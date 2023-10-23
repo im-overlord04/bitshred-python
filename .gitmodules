@@ -1,0 +1,3 @@
+[submodule "bitshred"]
+	path = bitshred
+	url = https://github.com/dbrumley/bitshred
