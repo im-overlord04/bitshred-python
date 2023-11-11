@@ -1,18 +1,20 @@
 import os
 import argparse
 from dataclasses import dataclass, field
+import pickle
 import logging
 
 from functools import total_ordering 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.DEBUG)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.DEBUG, filename='bitshred.log', filemode='w')
 
 import pefile
 
 @total_ordering
-@dataclass
 class Address:
-    """A class to print the address in hex format in repr"""
-    address: int
+    """Address class prints the memory address in hex format in repr"""
+
+    def __init__(self, address: int) -> None:
+        self.address = address
 
     def __repr__(self) -> str:
         return hex(self.address)
@@ -28,6 +30,9 @@ class Address:
         except ValueError:
             logging.debug(f'Other is also not an integer')
             raise
+
+    def __eq__(self, other: 'Address') -> bool:
+        return self.address == other.addressss
     
     def __lt__(self, other: 'Address') -> bool:
         return self.address < other.address
@@ -48,6 +53,7 @@ class BinaryFile:
     sections: list[Section]
 
 def main(args: argparse.Namespace):
+    fingerprints: dict[str, bytearray] = {}
     for root, _, files in os.walk(args.binary):
         for file in files:
             sample = os.path.join(root, file)
@@ -63,10 +69,40 @@ def main(args: argparse.Namespace):
                 logging.warning(f'{sample} skipped (no appropriate sections)')
                 continue
 
-            # TODO: create fingerprint
-            for i in range(len(shred_hashes) - args.window_size + 1):
-                pass
+            fingerprint = create_fingerprint(shred_hashes, args.fp_size, args.window_size)
+            fingerprints[sample] = fingerprint
 
+    pickle.dump(fingerprints, open('fingerprints.pkl', 'wb'))
+
+def create_fingerprint(shred_hashes: list[int], fp_size: int, window_size: int) -> bytearray:
+    fp_size_bytes = fp_size * 1024  # fp_size is in KB
+    fp_size_bits = fp_size_bytes * 8
+
+    bit_vector = bytearray(fp_size_bytes)
+    min_hash_idx = -1
+    for i in range(len(shred_hashes) - window_size + 1):
+        # current window is shred_hashes[i:i+window_size]
+        
+        if min_hash_idx < i:  # min_hash_idx is not in current window
+            min_hash = shred_hashes[i]
+            min_hash_idx = i
+            for j in range(1, window_size):
+                if shred_hashes[i+j] <= min_hash:
+                    min_hash = shred_hashes[i+j]
+                    min_hash_idx = i + j
+            bit_vector_set(bit_vector, min_hash & (fp_size_bits - 1))
+        else:  # min_hash_idx is in current window
+            if shred_hashes[i+window_size-1] <= min_hash:
+                min_hash = shred_hashes[i+window_size-1]
+                min_hash_idx = i + window_size - 1
+                bit_vector_set(bit_vector, min_hash & (fp_size_bits - 1))
+    
+    return bit_vector
+
+def bit_vector_set(vector: bytearray, offset: int) -> None:
+    byte_index = offset >> 3
+    bit_mask = 1 << (offset & 0x7)
+    vector[byte_index] |= bit_mask
 
 
 def initailaize_binary_file(file_path: str) -> BinaryFile:
