@@ -16,7 +16,8 @@ def compare_fingerprint_db(db: str):
         logging.info(f'{file_a} vs {file_b}: {similarity=}')
 
 def update_fingerprint_db(binary: str, shred_size: int, window_size: int, fp_size: int, db: str) -> None:
-    """Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
+    """
+    Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
     """
 
     fingerprints: dict[str, bytearray] = {}
@@ -109,7 +110,8 @@ def djb2_hash(data: bytes) -> int:
 
 def jaccard_distance(fp_a: bytearray, fp_b: bytearray) -> float:
     bit_vector_intersection = 0
-    for byte_a, byte_b in zip(fp_a, fp_b):
+    # `strict=True` checks if the lengths of `fp_a` and `fp_b` are equal
+    for byte_a, byte_b in zip(fp_a, fp_b, strict=True):
         bit_vector_intersection += bit_count(byte_a & byte_b)
 
     bit_count_a = bit_count(fp_a)

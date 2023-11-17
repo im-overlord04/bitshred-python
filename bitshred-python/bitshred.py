@@ -7,7 +7,7 @@ from fingerprint_db import (
 )
 
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.DEBUG, filename='bitshred.log', filemode='w')
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.DEBUG)
 
 
 def main(args: argparse.Namespace) -> None:
