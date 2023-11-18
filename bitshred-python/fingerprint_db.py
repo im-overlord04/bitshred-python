@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from itertools import combinations
 import pickle
 import logging
@@ -7,6 +8,13 @@ from binary_file import BinaryFile, initailaize_binary_file
 
 
 FINGERPRINT_DB = 'fingerprints.pkl'
+MAX_SET_BITS_RATIO = 0.8
+
+
+@dataclass
+class Fingerprint:
+    bit_vector: bytearray
+    bit_count: int
 
 
 def compare_fingerprint_db(db: str):
@@ -20,7 +28,7 @@ def update_fingerprint_db(binary: str, shred_size: int, window_size: int, fp_siz
     Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
     """
 
-    fingerprints: dict[str, bytearray] = {}
+    fingerprints: dict[str, Fingerprint] = {}
     for root, _, files in os.walk(binary):
         for file in files:
             sample = os.path.join(root, file)
@@ -33,11 +41,16 @@ def update_fingerprint_db(binary: str, shred_size: int, window_size: int, fp_siz
             shred_hashes = shred_section(binary_file, shred_size)
 
             if len(shred_hashes) < window_size:
-                logging.warning(f'{sample} skipped (no appropriate sections)')
+                logging.warning(f'{sample} skipped (no appropriate sections): {len(shred_hashes)=}, {window_size=}')
                 continue
 
             fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
-            fingerprints[file] = fingerprint
+
+            if (fp_set_bits := bit_count(fingerprint)) > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
+                logging.warning(f'{sample} skipped (too big to fit into the current fingerprint): {fp_set_bits=}, {fp_size=}')
+                continue
+
+            fingerprints[file] = Fingerprint(fingerprint, fp_set_bits)
 
     pickle.dump(fingerprints, open(os.path.join(db, FINGERPRINT_DB), 'wb'))
 
@@ -108,24 +121,15 @@ def djb2_hash(data: bytes) -> int:
     # limits the hash to 32 bits (unsigned int)
     return hash & 0xFFFFFFFF
 
-def jaccard_distance(fp_a: bytearray, fp_b: bytearray) -> float:
+def jaccard_distance(fp_a: Fingerprint, fp_b: Fingerprint) -> float:
     bit_vector_intersection = 0
     # `strict=True` checks if the lengths of `fp_a` and `fp_b` are equal
-    for byte_a, byte_b in zip(fp_a, fp_b, strict=True):
-        bit_vector_intersection += bit_count(byte_a & byte_b)
+    for byte_a, byte_b in zip(fp_a.bit_vector, fp_b.bit_vector, strict=True):
+        bit_vector_intersection += (byte_a & byte_b).bit_count()
 
-    bit_count_a = bit_count(fp_a)
-    bit_count_b = bit_count(fp_b)
-    bit_vector_union = bit_count_a + bit_count_b - bit_vector_intersection
+    bit_vector_union = fp_a.bit_count + fp_b.bit_count - bit_vector_intersection
 
     return bit_vector_intersection / bit_vector_union
 
-def bit_count(bit_vector: bytearray | int, /) -> int:
-    if isinstance(bit_vector, int):
-        return bin(bit_vector).count('1')
-    elif isinstance(bit_vector, bytearray):
-        return sum(bin(byte).count('1') for byte in bit_vector)
-    else:
-        error_msg = f'Unsupported type for bit count: {type(bit_vector)}'
-        logging.error(error_msg)
-        raise TypeError(error_msg)
+def bit_count(fingerprint: bytearray) -> int:
+    return sum(byte.bit_count() for byte in fingerprint)
