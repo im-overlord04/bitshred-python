@@ -3,11 +3,15 @@ from dataclasses import dataclass
 from itertools import combinations
 import pickle
 import logging
+from time import perf_counter
+from concurrent.futures import ProcessPoolExecutor
+from typing import NamedTuple
 
 from binary_file import BinaryFile, initailaize_binary_file
 
 
 FINGERPRINT_DB = 'fingerprints.pkl'
+JACCARD_DB = 'jaccard.pkl'
 MAX_SET_BITS_RATIO = 0.8
 
 
@@ -16,17 +20,44 @@ class Fingerprint:
     bit_vector: bytearray
     bit_count: int
 
+class JaccardDistanceResult(NamedTuple):
+    file_a: str
+    file_b: str
+    similarity: float
+
+
+def jacard_distance_worker(
+    fp_pair: tuple[tuple[str, Fingerprint], tuple[str, Fingerprint]]
+) -> JaccardDistanceResult:
+    file_a, fp_a = fp_pair[0]
+    file_b, fp_b = fp_pair[1]
+    similarity = jaccard_distance(fp_a, fp_b)
+    return JaccardDistanceResult(file_a, file_b, similarity)
 
 def compare_fingerprint_db(db: str):
+    # for performance measurement
+    start_time: float = perf_counter()
+
     fingerprints = pickle.load(open(os.path.join(db, FINGERPRINT_DB), 'rb'))
-    for file_a, file_b in combinations(fingerprints.keys(), 2):
-        similarity = jaccard_distance(fingerprints[file_a], fingerprints[file_b])
-        logging.info(f'{file_a} vs {file_b}: {similarity=}')
+    jaccard_distances: dict[frozenset[str], float] = {}
+    with ProcessPoolExecutor() as executor:
+        for file_a, file_b, similarity in executor.map(jacard_distance_worker, combinations(fingerprints.items(), 2)):
+            jaccard_distances[frozenset([file_a, file_b])] = similarity
+            logging.debug(f'{file_a} vs {file_b}: {similarity=}')
+    
+    pickle.dump(jaccard_distances, open(os.path.join(db, JACCARD_DB), 'wb'))
+
+    elapsed_time = perf_counter() - start_time
+    logging.info('--------------- Comparing Database ---------------')
+    logging.info(f'# of viruses : {len(fingerprints)}')
+    logging.info(f'Time         : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
 
 def update_fingerprint_db(binary: str, shred_size: int, window_size: int, fp_size: int, db: str) -> None:
     """
     Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
     """
+    # for performance measurement
+    start_time: float = perf_counter()
 
     fingerprints: dict[str, Fingerprint] = {}
     for root, _, files in os.walk(binary):
@@ -53,6 +84,11 @@ def update_fingerprint_db(binary: str, shred_size: int, window_size: int, fp_siz
             fingerprints[file] = Fingerprint(fingerprint, fp_set_bits)
 
     pickle.dump(fingerprints, open(os.path.join(db, FINGERPRINT_DB), 'wb'))
+
+    elapsed_time = perf_counter() - start_time
+    logging.info('--------------- Updating Database ---------------')
+    logging.info(f'Processed files : {len(fingerprints)}')
+    logging.info(f'Time            : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
 
 def create_fingerprint(shred_hashes: list[int], fp_size: int, window_size: int) -> bytearray:
     fp_size_bytes = fp_size * 1024  # fp_size is in KB
@@ -105,7 +141,6 @@ def shred_section(binary_file: BinaryFile, shred_size: int) -> list[int]:
             shred_hashes.append(shred_hash)
 
         logging.debug(f'Finished processing section {section.name}')
-        logging.debug(f'{shred_hashes[:5]=}')
 
     return shred_hashes
 
