@@ -1,11 +1,7 @@
 import argparse
 import logging
 
-from fingerprint_db import (
-    update_fingerprint_db,
-    compare_fingerprint_db
-)
-
+from fingerprint_db import compare_fingerprint_db, update_fingerprint_db
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.DEBUG)
 
@@ -22,11 +18,14 @@ if __name__ == '__main__':
 
     execution_mode = parser.add_mutually_exclusive_group(required=True)
     execution_mode.add_argument(
-        '-b', '--binary',
+        '-b',
+        '--binary',
         help='Update database by processing binary files, add path to directory containing binary files after this option',
-        default=None
+        default=None,
     )
-    execution_mode.add_argument('-p', '--compare', action='store_true', help='Compare samples in database')
+    execution_mode.add_argument(
+        '-p', '--compare', action='store_true', help='Compare samples in database'
+    )
 
     parser.add_argument('-s', '--shred-size', help='Shred size', default=4, type=int)
     parser.add_argument('-w', '--window-size', help='Window size', default=1, type=int)

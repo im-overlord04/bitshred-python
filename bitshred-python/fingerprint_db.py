@@ -1,14 +1,12 @@
+import logging
 import os
+import pickle
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from itertools import combinations
-import pickle
-import logging
 from time import perf_counter
-from concurrent.futures import ProcessPoolExecutor
-from typing import NamedTuple
 
 from binary_file import BinaryFile, initailaize_binary_file
-
 
 FINGERPRINT_DB = 'fingerprints.pkl'
 JACCARD_DB = 'jaccard.pkl'
@@ -20,31 +18,29 @@ class Fingerprint:
     bit_vector: bytearray
     bit_count: int
 
-class JaccardDistanceResult(NamedTuple):
-    file_a: str
-    file_b: str
-    similarity: float
-
-
-def jacard_distance_worker(
-    fp_pair: tuple[tuple[str, Fingerprint], tuple[str, Fingerprint]]
-) -> JaccardDistanceResult:
-    file_a, fp_a = fp_pair[0]
-    file_b, fp_b = fp_pair[1]
-    similarity = jaccard_distance(fp_a, fp_b)
-    return JaccardDistanceResult(file_a, file_b, similarity)
 
 def compare_fingerprint_db(db: str):
+    """
+    Compare the fingerprints of all the samples in `fingerprints.pkl` pairwise using Jaccard distance
+    and store the results in `jaccard.pkl`
+    """
     # for performance measurement
     start_time: float = perf_counter()
 
     fingerprints = pickle.load(open(os.path.join(db, FINGERPRINT_DB), 'rb'))
-    jaccard_distances: dict[frozenset[str], float] = {}
+    # note: to debug, set max_workers=1 then the code will run sequentially
     with ProcessPoolExecutor() as executor:
-        for file_a, file_b, similarity in executor.map(jacard_distance_worker, combinations(fingerprints.items(), 2)):
+        futures = []
+        for file_a, file_b in combinations(fingerprints.keys(), 2):
+            future = executor.submit(jaccard_distance, fingerprints[file_a], fingerprints[file_b])
+            futures.append((file_a, file_b, future))
+
+        jaccard_distances: dict[frozenset[str], float] = {}
+        for file_a, file_b, future in futures:
+            similarity = future.result()
             jaccard_distances[frozenset([file_a, file_b])] = similarity
             logging.debug(f'{file_a} vs {file_b}: {similarity=}')
-    
+
     pickle.dump(jaccard_distances, open(os.path.join(db, JACCARD_DB), 'wb'))
 
     elapsed_time = perf_counter() - start_time
@@ -52,36 +48,30 @@ def compare_fingerprint_db(db: str):
     logging.info(f'# of viruses : {len(fingerprints)}')
     logging.info(f'Time         : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
 
-def update_fingerprint_db(binary: str, shred_size: int, window_size: int, fp_size: int, db: str) -> None:
+
+def update_fingerprint_db(
+    binary: str, shred_size: int, window_size: int, fp_size: int, db: str
+) -> None:
     """
     Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
     """
     # for performance measurement
     start_time: float = perf_counter()
 
-    fingerprints: dict[str, Fingerprint] = {}
-    for root, _, files in os.walk(binary):
-        for file in files:
-            sample = os.path.join(root, file)
+    # note: to debug, set max_workers=1 then the code will run sequentially
+    with ProcessPoolExecutor() as executor:
+        futures = []
+        for root, _, files in os.walk(binary):
+            for file in files:
+                sample = os.path.join(root, file)
+                future = executor.submit(process_sample, sample, shred_size, window_size, fp_size)
+                futures.append((file, future))
 
-            binary_file = initailaize_binary_file(sample)
-            if not binary_file:
-                continue
-            
-            logging.debug(binary_file)
-            shred_hashes = shred_section(binary_file, shred_size)
-
-            if len(shred_hashes) < window_size:
-                logging.warning(f'{sample} skipped (no appropriate sections): {len(shred_hashes)=}, {window_size=}')
-                continue
-
-            fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
-
-            if (fp_set_bits := bit_count(fingerprint)) > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
-                logging.warning(f'{sample} skipped (too big to fit into the current fingerprint): {fp_set_bits=}, {fp_size=}')
-                continue
-
-            fingerprints[file] = Fingerprint(fingerprint, fp_set_bits)
+        fingerprints: dict[str, Fingerprint] = {}
+        for file, future in futures:
+            fingerprint = future.result()
+            if fingerprint:
+                fingerprints[file] = fingerprint
 
     pickle.dump(fingerprints, open(os.path.join(db, FINGERPRINT_DB), 'wb'))
 
@@ -89,6 +79,34 @@ def update_fingerprint_db(binary: str, shred_size: int, window_size: int, fp_siz
     logging.info('--------------- Updating Database ---------------')
     logging.info(f'Processed files : {len(fingerprints)}')
     logging.info(f'Time            : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
+
+
+def process_sample(
+    sample: str, shred_size: int, window_size: int, fp_size: int
+) -> Fingerprint | None:
+    binary_file = initailaize_binary_file(sample)
+    if not binary_file:
+        return None
+
+    logging.debug(binary_file)
+    shred_hashes = shred_section(binary_file, shred_size)
+
+    if len(shred_hashes) < window_size:
+        logging.warning(
+            f'{sample} skipped (no appropriate sections): {len(shred_hashes)=}, {window_size=}'
+        )
+        return None
+
+    fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
+
+    if (fp_set_bits := bit_count(fingerprint)) > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
+        logging.warning(
+            f'{sample} skipped (too big to fit into the current fingerprint): {fp_set_bits=}, {fp_size=}'
+        )
+        return None
+
+    return Fingerprint(fingerprint, fp_set_bits)
+
 
 def create_fingerprint(shred_hashes: list[int], fp_size: int, window_size: int) -> bytearray:
     fp_size_bytes = fp_size * 1024  # fp_size is in KB
@@ -98,22 +116,23 @@ def create_fingerprint(shred_hashes: list[int], fp_size: int, window_size: int) 
     min_hash_idx = -1
     for i in range(len(shred_hashes) - window_size + 1):
         # current window is shred_hashes[i:i+window_size]
-        
+
         if min_hash_idx < i:  # min_hash_idx is not in current window
             min_hash = shred_hashes[i]
             min_hash_idx = i
             for j in range(1, window_size):
-                if shred_hashes[i+j] <= min_hash:
-                    min_hash = shred_hashes[i+j]
+                if shred_hashes[i + j] <= min_hash:
+                    min_hash = shred_hashes[i + j]
                     min_hash_idx = i + j
             bit_vector_set(bit_vector, min_hash & (fp_size_bits - 1))
         else:  # min_hash_idx is in current window
-            if shred_hashes[i+window_size-1] <= min_hash:
-                min_hash = shred_hashes[i+window_size-1]
+            if shred_hashes[i + window_size - 1] <= min_hash:
+                min_hash = shred_hashes[i + window_size - 1]
                 min_hash_idx = i + window_size - 1
                 bit_vector_set(bit_vector, min_hash & (fp_size_bits - 1))
-    
+
     return bit_vector
+
 
 def shred_section(binary_file: BinaryFile, shred_size: int) -> list[int]:
     logging.debug(f'Shredding {binary_file.filename}')
@@ -121,22 +140,24 @@ def shred_section(binary_file: BinaryFile, shred_size: int) -> list[int]:
     shred_hashes = []
     for section in binary_file.sections:
         if (
-            not section.is_code or
-            not (section.vma <= binary_file.start_addr <= section.vma + section.data_size) and
-            section.name not in ('.text', 'CODE')
+            not section.is_code
+            or not (section.vma <= binary_file.start_addr <= section.vma + section.data_size)
+            and section.name not in ('.text', 'CODE')
         ):
             logging.debug(f'Skipping section {section.name}: {section}')
             continue
 
         if section.data_size < shred_size:
-            logging.warning(f'Invalid size for section {section.name}: {section.data_size=}, {shred_size=}')
+            logging.warning(
+                f'Invalid size for section {section.name}: {section.data_size=}, {shred_size=}'
+            )
             continue
 
         logging.debug(f'Processing section {section.name}: {section.data_size=}, {shred_size=}')
 
         section_shred_num = section.data_size - shred_size + 1
         for i in range(section_shred_num):
-            shred = section.data[i:i+shred_size]
+            shred = section.data[i : i + shred_size]
             shred_hash = djb2_hash(shred)
             shred_hashes.append(shred_hash)
 
@@ -144,10 +165,12 @@ def shred_section(binary_file: BinaryFile, shred_size: int) -> list[int]:
 
     return shred_hashes
 
+
 def bit_vector_set(vector: bytearray, offset: int) -> None:
     byte_index = offset >> 3
     bit_mask = 1 << (offset & 0x7)
     vector[byte_index] |= bit_mask
+
 
 def djb2_hash(data: bytes) -> int:
     hash = 5381
@@ -155,6 +178,7 @@ def djb2_hash(data: bytes) -> int:
         hash = hash * 33 + byte
     # limits the hash to 32 bits (unsigned int)
     return hash & 0xFFFFFFFF
+
 
 def jaccard_distance(fp_a: Fingerprint, fp_b: Fingerprint) -> float:
     bit_vector_intersection = 0
@@ -165,6 +189,7 @@ def jaccard_distance(fp_a: Fingerprint, fp_b: Fingerprint) -> float:
     bit_vector_union = fp_a.bit_count + fp_b.bit_count - bit_vector_intersection
 
     return bit_vector_intersection / bit_vector_union
+
 
 def bit_count(fingerprint: bytearray) -> int:
     return sum(byte.bit_count() for byte in fingerprint)
