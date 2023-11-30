@@ -1,7 +1,7 @@
 import logging
 import os
 import pickle
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from itertools import combinations
 from time import perf_counter
@@ -11,6 +11,7 @@ from binary_file import BinaryFile, initailaize_binary_file
 FINGERPRINT_DB = 'fingerprints.pkl'
 JACCARD_DB = 'jaccard.pkl'
 MAX_SET_BITS_RATIO = 0.8
+MULTIPROCESSING = True
 
 
 @dataclass
@@ -28,16 +29,24 @@ def compare_fingerprint_db(db: str):
     start_time: float = perf_counter()
 
     fingerprints = pickle.load(open(os.path.join(db, FINGERPRINT_DB), 'rb'))
-    # note: to debug, set max_workers=1 then the code will run sequentially
-    with ProcessPoolExecutor() as executor:
-        futures = []
-        for file_a, file_b in combinations(fingerprints.keys(), 2):
-            future = executor.submit(jaccard_distance, fingerprints[file_a], fingerprints[file_b])
-            futures.append((file_a, file_b, future))
+    jaccard_distances: dict[frozenset[str], float] = {}
+    if MULTIPROCESSING:
+        with ProcessPoolExecutor() as executor:
+            to_do_map = {}
+            for file_a, file_b in combinations(fingerprints.keys(), 2):
+                future = executor.submit(
+                    jaccard_distance, fingerprints[file_a], fingerprints[file_b]
+                )
+                to_do_map[future] = (file_a, file_b)
 
-        jaccard_distances: dict[frozenset[str], float] = {}
-        for file_a, file_b, future in futures:
-            similarity = future.result()
+            for future in as_completed(to_do_map):
+                file_a, file_b = to_do_map[future]
+                similarity = future.result()
+                jaccard_distances[frozenset([file_a, file_b])] = similarity
+                logging.debug(f'{file_a} vs {file_b}: {similarity=}')
+    else:
+        for file_a, file_b in combinations(fingerprints.keys(), 2):
+            similarity = jaccard_distance(fingerprints[file_a], fingerprints[file_b])
             jaccard_distances[frozenset([file_a, file_b])] = similarity
             logging.debug(f'{file_a} vs {file_b}: {similarity=}')
 
@@ -58,20 +67,30 @@ def update_fingerprint_db(
     # for performance measurement
     start_time: float = perf_counter()
 
-    # note: to debug, set max_workers=1 then the code will run sequentially
-    with ProcessPoolExecutor() as executor:
-        futures = []
+    fingerprints: dict[str, Fingerprint] = {}
+    if MULTIPROCESSING:
+        with ProcessPoolExecutor() as executor:
+            to_do_map = {}
+            for root, _, files in os.walk(binary):
+                for file in files:
+                    sample = os.path.join(root, file)
+                    future = executor.submit(
+                        process_sample, sample, shred_size, window_size, fp_size
+                    )
+                    to_do_map[future] = file
+
+            for future in as_completed(to_do_map):
+                file = to_do_map[future]
+                fingerprint = future.result()
+                if fingerprint:
+                    fingerprints[file] = fingerprint
+    else:
         for root, _, files in os.walk(binary):
             for file in files:
                 sample = os.path.join(root, file)
-                future = executor.submit(process_sample, sample, shred_size, window_size, fp_size)
-                futures.append((file, future))
-
-        fingerprints: dict[str, Fingerprint] = {}
-        for file, future in futures:
-            fingerprint = future.result()
-            if fingerprint:
-                fingerprints[file] = fingerprint
+                fingerprint = process_sample(sample, shred_size, window_size, fp_size)
+                if fingerprint:
+                    fingerprints[file] = fingerprint
 
     pickle.dump(fingerprints, open(os.path.join(db, FINGERPRINT_DB), 'wb'))
 
@@ -181,10 +200,10 @@ def djb2_hash(data: bytes) -> int:
 
 
 def jaccard_distance(fp_a: Fingerprint, fp_b: Fingerprint) -> float:
-    bit_vector_intersection = 0
-    # `strict=True` checks if the lengths of `fp_a` and `fp_b` are equal
-    for byte_a, byte_b in zip(fp_a.bit_vector, fp_b.bit_vector, strict=True):
-        bit_vector_intersection += (byte_a & byte_b).bit_count()
+    byteorder = 'little'
+    fp_a_bit_vector = int.from_bytes(fp_a.bit_vector, byteorder=byteorder)
+    fp_b_bit_vector = int.from_bytes(fp_b.bit_vector, byteorder=byteorder)
+    bit_vector_intersection = (fp_a_bit_vector & fp_b_bit_vector).bit_count()
 
     bit_vector_union = fp_a.bit_count + fp_b.bit_count - bit_vector_intersection
 
