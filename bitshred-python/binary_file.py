@@ -59,14 +59,6 @@ def initailaize_binary_file(file_path: str) -> BinaryFile | None:
         logging.warning(f'{file_path} is not a PE file')
         return None
 
-    pefile_metadata = {
-        'filename': os.path.basename(file_path),
-        'file_size': os.path.getsize(file_path),
-        'start_addr': Address(
-            pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.AddressOfEntryPoint
-        ),
-    }
-
     sections_data = [
         Section(
             name=section.Name.decode().rstrip('\x00'),
@@ -79,4 +71,11 @@ def initailaize_binary_file(file_path: str) -> BinaryFile | None:
         for section in pe.sections
     ]
 
-    return BinaryFile(**pefile_metadata, sections=sections_data)
+    return BinaryFile(
+        filename=os.path.basename(file_path),
+        file_size=os.path.getsize(file_path),
+        start_addr=Address(
+            pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.AddressOfEntryPoint
+        ),
+        sections=sections_data
+    )
