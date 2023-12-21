@@ -1,6 +1,8 @@
+import json
 import logging
 import os
 import pickle
+import reprlib
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -10,9 +12,19 @@ from typing import Literal
 
 from binary_file import BinaryFile, initailaize_binary_file
 
-FINGERPRINT_DB = 'fingerprints.pkl'
-JACCARD_DB = 'jaccard.pkl'
-CLUSTER_DB = 'cluster.pkl'
+FINGERPRINT_BASE = 'fingerprints'
+JACCARD_BASE = 'jaccard'
+CLUSTER_BASE = 'cluster'
+
+FINGERPRINT_DB = f'{FINGERPRINT_BASE}.pkl'
+JACCARD_DB = f'{JACCARD_BASE}.pkl'
+CLUSTER_DB = f'{CLUSTER_BASE}.pkl'
+
+# JSON files for human-readable output
+FINGERPRINT_JSON = f'{FINGERPRINT_BASE}.json'
+JACCARD_JSON = f'{JACCARD_BASE}.json'
+CLUSTER_JSON = f'{CLUSTER_BASE}.json'
+
 MAX_SET_BITS_RATIO = 0.8
 MULTIPROCESSING = True
 
@@ -21,6 +33,13 @@ MULTIPROCESSING = True
 class Fingerprint:
     bit_vector: bytearray
     bit_count: int
+
+
+def fingerprint_encoder(fingerprint: Fingerprint) -> dict[str, str | int]:
+    return {
+        'bit_vector': reprlib.repr(fingerprint.bit_vector.hex()),
+        'bit_count': fingerprint.bit_count,
+    }
 
 
 def update_fingerprint_db(
@@ -58,6 +77,12 @@ def update_fingerprint_db(
                     fingerprints[file] = fingerprint
 
     pickle.dump(fingerprints, open(os.path.join(db, FINGERPRINT_DB), 'wb'))
+    json.dump(
+        fingerprints,
+        open(os.path.join(db, FINGERPRINT_JSON), 'w'),
+        default=fingerprint_encoder,
+        indent=4,
+    )
 
     elapsed_time = perf_counter() - start_time
     logging.info('--------------- Updating Database ---------------')
@@ -65,7 +90,7 @@ def update_fingerprint_db(
     logging.info(f'Time            : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
 
 
-def compare_fingerprint_db(db: str):
+def compare_fingerprint_db(db: str) -> None:
     """
     Compare the fingerprints of all the samples in `fingerprints.pkl` pairwise using Jaccard distance
     and store the results in `jaccard.pkl`
@@ -87,15 +112,20 @@ def compare_fingerprint_db(db: str):
             for future in as_completed(to_do_map):
                 file_a, file_b = to_do_map[future]
                 similarity = future.result()
-                jaccard_distances[frozenset([file_a, file_b])] = similarity
+                jaccard_distances[frozenset({file_a, file_b})] = similarity
                 logging.debug(f'{file_a} vs {file_b}: {similarity=}')
     else:
         for file_a, file_b in combinations(fingerprints.keys(), 2):
             similarity = jaccard_distance(fingerprints[file_a], fingerprints[file_b])
-            jaccard_distances[frozenset([file_a, file_b])] = similarity
+            jaccard_distances[frozenset({file_a, file_b})] = similarity
             logging.debug(f'{file_a} vs {file_b}: {similarity=}')
 
     pickle.dump(jaccard_distances, open(os.path.join(db, JACCARD_DB), 'wb'))
+    json.dump(
+        {reprlib.repr(k): v for k, v in jaccard_distances.items()},
+        open(os.path.join(db, JACCARD_JSON), 'w'),
+        indent=4,
+    )
 
     elapsed_time = perf_counter() - start_time
     logging.info('--------------- Comparing Database ---------------')
@@ -105,7 +135,8 @@ def compare_fingerprint_db(db: str):
 
 def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
     """
-    Cluster the samples in `fingerprints.pkl` using Jaccard distance and store the results in `cluster.pkl`
+    Cluster the samples in `fingerprints.pkl` using Jaccard distance stored in `jaccard.pkl`
+    and store the results in `cluster.pkl`
     """
     # for performance measurement
     start_time: float = perf_counter()
@@ -134,7 +165,7 @@ def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
             # sample_b is not assigned to any cluster yet
             elif cluster_assignment[sample_b] == 0:
                 cluster_assignment[sample_b] = cluster_assignment[sample_a]
-            # both samples are assigned to different clusters
+            # both samples are assigned to some clusters
             else:
                 cluster_a = cluster_assignment[sample_a]
                 cluster_b = cluster_assignment[sample_b]
@@ -150,7 +181,7 @@ def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
     for sample, cluster_id in cluster_assignment.items():
         clusters[cluster_id].append(sample)
 
-    # samples in cluster 0 form their own cluster
+    # place samples in cluster 0 (samples that do not belong to any cluster) to their own cluster
     cluster_id = len(clusters)
     for sample in clusters[0]:
         clusters[cluster_id].append(sample)
@@ -158,6 +189,7 @@ def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
     del clusters[0]
 
     pickle.dump(dict(clusters), open(os.path.join(db, CLUSTER_DB), 'wb'))
+    json.dump(dict(clusters), open(os.path.join(db, CLUSTER_JSON), 'w'), indent=4)
 
     elapsed_time = perf_counter() - start_time
     logging.info('--------------- Clustering Database ---------------')

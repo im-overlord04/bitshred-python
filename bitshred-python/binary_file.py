@@ -74,8 +74,6 @@ def initailaize_binary_file(file_path: str) -> BinaryFile | None:
     return BinaryFile(
         filename=os.path.basename(file_path),
         file_size=os.path.getsize(file_path),
-        start_addr=Address(
-            pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.AddressOfEntryPoint
-        ),
-        sections=sections_data
+        start_addr=Address(pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+        sections=sections_data,
     )
