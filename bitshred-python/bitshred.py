@@ -32,8 +32,8 @@ if __name__ == '__main__':
         '-r', '--cluster', action='store_true', help='Cluster samples in database'
     )
 
-    parser.add_argument('-s', '--shred-size', help='Shred size', default=4, type=int)
-    parser.add_argument('-w', '--window-size', help='Window size', default=1, type=int)
+    parser.add_argument('-s', '--shred-size', help='Shred size', default=12, type=int)
+    parser.add_argument('-w', '--window-size', help='Window size', default=16, type=int)
     parser.add_argument('--fp-size', help='Fingerprint size (in KB)', default=32, type=int)
     parser.add_argument('-d', '--db', help='Set database path', default='.', type=str)
     parser.add_argument('-j', '--jacard', help='Set Jaccard threshold', default=0.6, type=float)

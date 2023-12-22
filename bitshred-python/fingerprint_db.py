@@ -25,7 +25,7 @@ FINGERPRINT_JSON = f'{FINGERPRINT_BASE}.json'
 JACCARD_JSON = f'{JACCARD_BASE}.json'
 CLUSTER_JSON = f'{CLUSTER_BASE}.json'
 
-MAX_SET_BITS_RATIO = 0.8
+MAX_SET_BITS_RATIO = 0.7
 MULTIPROCESSING = True
 
 
@@ -215,6 +215,7 @@ def process_sample(
         return None
 
     fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
+    logging.debug(f'{bit_count(fingerprint)} bits set in fingerprint')
 
     if (fp_set_bits := bit_count(fingerprint)) > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
         logging.warning(
@@ -256,9 +257,12 @@ def shred_section(binary_file: BinaryFile, shred_size: int) -> list[int]:
 
     shred_hashes = []
     for section in binary_file.sections:
+        # only process the executable section located at entry point whose name is .text or CODE
         if (
-            not section.is_code
-            or not (section.vma <= binary_file.start_addr <= section.vma + section.data_size)
+            (
+                not section.is_code
+                or not (section.vma <= binary_file.start_addr <= section.vma + section.data_size)
+            )
             and section.name not in ('.text', 'CODE')
         ):
             logging.debug(f'Skipping section {section.name}: {section}')
@@ -280,6 +284,7 @@ def shred_section(binary_file: BinaryFile, shred_size: int) -> list[int]:
 
         logging.debug(f'Finished processing section {section.name}')
 
+    logging.debug(f'{len(shred_hashes)=}')
     return shred_hashes
 
 
