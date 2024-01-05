@@ -43,7 +43,7 @@ def fingerprint_encoder(fingerprint: Fingerprint) -> dict[str, str | int]:
 
 
 def update_fingerprint_db(
-    binary: str, shred_size: int, window_size: int, fp_size: int, db: str
+    binary: str, shred_size: int, window_size: int, fp_size: int, db: str, data_sec: bool
 ) -> None:
     """
     Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
@@ -59,7 +59,7 @@ def update_fingerprint_db(
                 for file in files:
                     sample = os.path.join(root, file)
                     future = executor.submit(
-                        process_sample, sample, shred_size, window_size, fp_size
+                        process_sample, sample, shred_size, window_size, fp_size, data_sec
                     )
                     to_do_map[future] = file
 
@@ -72,7 +72,7 @@ def update_fingerprint_db(
         for root, _, files in os.walk(binary):
             for file in files:
                 sample = os.path.join(root, file)
-                fingerprint = process_sample(sample, shred_size, window_size, fp_size)
+                fingerprint = process_sample(sample, shred_size, window_size, fp_size, data_sec)
                 if fingerprint:
                     fingerprints[file] = fingerprint
 
@@ -88,6 +88,12 @@ def update_fingerprint_db(
     logging.info('--------------- Updating Database ---------------')
     logging.info(f'Processed files : {len(fingerprints)}')
     logging.info(f'Time            : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
+
+def _update_with_executables():
+    pass
+
+def _update_with_raw_files():
+    pass
 
 
 def compare_fingerprint_db(db: str) -> None:
@@ -199,14 +205,14 @@ def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
 
 
 def process_sample(
-    sample: str, shred_size: int, window_size: int, fp_size: int
+    sample: str, shred_size: int, window_size: int, fp_size: int, data_sec: bool
 ) -> Fingerprint | None:
     binary_file = initailaize_binary_file(sample)
     if not binary_file:
         return None
 
     logging.debug(binary_file)
-    shred_hashes = shred_section(binary_file, shred_size)
+    shred_hashes = shred_section(binary_file, shred_size, data_sec)
 
     if len(shred_hashes) < window_size:
         logging.warning(
@@ -252,18 +258,20 @@ def create_fingerprint(shred_hashes: list[int], fp_size: int, window_size: int) 
     return bit_vector
 
 
-def shred_section(binary_file: BinaryFile, shred_size: int) -> list[int]:
+def shred_section(binary_file: BinaryFile, shred_size: int, data_sec: bool) -> list[int]:
     logging.debug(f'Shredding {binary_file.filename}')
 
     shred_hashes = []
     for section in binary_file.sections:
         # only process the executable section located at entry point whose name is .text or CODE
+        # and the .data section if the data_sec flag is set
         if (
             (
                 not section.is_code
                 or not (section.vma <= binary_file.start_addr <= section.vma + section.data_size)
             )
             and section.name not in ('.text', 'CODE')
+            and not (data_sec and section.name == '.data')
         ):
             logging.debug(f'Skipping section {section.name}: {section}')
             continue
