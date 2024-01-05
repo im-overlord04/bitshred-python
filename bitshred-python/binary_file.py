@@ -58,25 +58,28 @@ def initailaize_binary_file(file_path: str) -> BinaryFile | None:
     except pefile.PEFormatError:
         logging.warning(f'{file_path} is not a PE file')
         return None
-
-    pefile_metadata = {
-        'filename': os.path.basename(file_path),
-        'file_size': os.path.getsize(file_path),
-        'start_addr': Address(
-            pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.AddressOfEntryPoint
-        ),
-    }
+    
+    def _section_size(raw_size: int, virtual_size: int) -> int:
+        min_size = min(raw_size, virtual_size)
+        if min_size == 0:
+            return max(raw_size, virtual_size)
+        else:
+            return min_size
 
     sections_data = [
         Section(
             name=section.Name.decode().rstrip('\x00'),
             data=section.get_data(),
-            # TODO: should we use SizeOfRawData or Misc_VirtualSize?
-            data_size=section.SizeOfRawData,
+            data_size=_section_size(section.SizeOfRawData, section.Misc_VirtualSize),
             vma=Address(pe.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),
             is_code=section.IMAGE_SCN_CNT_CODE or section.IMAGE_SCN_MEM_EXECUTE,
         )
         for section in pe.sections
     ]
 
-    return BinaryFile(**pefile_metadata, sections=sections_data)
+    return BinaryFile(
+        filename=os.path.basename(file_path),
+        file_size=os.path.getsize(file_path),
+        start_addr=Address(pe.OPTIONAL_HEADER.ImageBase + pe.OPTIONAL_HEADER.AddressOfEntryPoint),
+        sections=sections_data,
+    )
