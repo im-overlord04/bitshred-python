@@ -58,7 +58,7 @@ def initailaize_binary_file(file_path: str) -> BinaryFile | None:
     except pefile.PEFormatError:
         logging.warning(f'{file_path} is not a PE file')
         return None
-    
+
     def _section_size(raw_size: int, virtual_size: int) -> int:
         min_size = min(raw_size, virtual_size)
         if min_size == 0:

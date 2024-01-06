@@ -5,12 +5,12 @@ import pickle
 import reprlib
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
 from itertools import combinations
 from time import perf_counter
-from typing import Literal
 
 from binary_file import BinaryFile, initailaize_binary_file
+from fingerprint import Fingerprint, create_fingerprint, fingerprint_encoder, jaccard_distance
+from utils import djb2_hash
 
 FINGERPRINT_BASE = 'fingerprints'
 JACCARD_BASE = 'jaccard'
@@ -29,52 +29,26 @@ MAX_SET_BITS_RATIO = 0.7
 MULTIPROCESSING = True
 
 
-@dataclass
-class Fingerprint:
-    bit_vector: bytearray
-    bit_count: int
-
-
-def fingerprint_encoder(fingerprint: Fingerprint) -> dict[str, str | int]:
-    return {
-        'bit_vector': reprlib.repr(fingerprint.bit_vector.hex()),
-        'bit_count': fingerprint.bit_count,
-    }
-
-
 def update_fingerprint_db(
-    binary: str, shred_size: int, window_size: int, fp_size: int, db: str, data_sec: bool
+    binary: str, raw: str, shred_size: int, window_size: int, fp_size: int, db: str, data_sec: bool
 ) -> None:
     """
-    Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
+    Compute the fingerprints of all the samples in either `binary` or `raw` directory depending on the settings
+    and store the results in `fingerprints.pkl`
     """
     # for performance measurement
     start_time: float = perf_counter()
 
-    fingerprints: dict[str, Fingerprint] = {}
-    if MULTIPROCESSING:
-        with ProcessPoolExecutor() as executor:
-            to_do_map = {}
-            for root, _, files in os.walk(binary):
-                for file in files:
-                    sample = os.path.join(root, file)
-                    future = executor.submit(
-                        process_sample, sample, shred_size, window_size, fp_size, data_sec
-                    )
-                    to_do_map[future] = file
-
-            for future in as_completed(to_do_map):
-                file = to_do_map[future]
-                fingerprint = future.result()
-                if fingerprint:
-                    fingerprints[file] = fingerprint
+    if binary:
+        fingerprints = _update_with_executables(
+            binary, shred_size, window_size, fp_size, db, data_sec
+        )
+    elif raw:
+        fingerprints = _update_with_raw_files(raw, shred_size, window_size, fp_size, db)
     else:
-        for root, _, files in os.walk(binary):
-            for file in files:
-                sample = os.path.join(root, file)
-                fingerprint = process_sample(sample, shred_size, window_size, fp_size, data_sec)
-                if fingerprint:
-                    fingerprints[file] = fingerprint
+        error_message = 'Either binary or raw directory must be specified'
+        logging.error(error_message)
+        raise ValueError(error_message)
 
     pickle.dump(fingerprints, open(os.path.join(db, FINGERPRINT_DB), 'wb'))
     json.dump(
@@ -89,11 +63,73 @@ def update_fingerprint_db(
     logging.info(f'Processed files : {len(fingerprints)}')
     logging.info(f'Time            : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
 
-def _update_with_executables():
-    pass
 
-def _update_with_raw_files():
-    pass
+def _update_with_executables(
+    binary: str, shred_size: int, window_size: int, fp_size: int, db: str, data_sec: bool
+) -> dict[str, Fingerprint]:
+    """
+    Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
+    """
+    fingerprints: dict[str, Fingerprint] = {}
+    if MULTIPROCESSING:
+        with ProcessPoolExecutor() as executor:
+            to_do_map = {}
+            for root, _, files in os.walk(binary):
+                for file in files:
+                    sample = os.path.join(root, file)
+                    future = executor.submit(
+                        process_executable, sample, shred_size, window_size, fp_size, data_sec
+                    )
+                    to_do_map[future] = file
+
+            for future in as_completed(to_do_map):
+                file = to_do_map[future]
+                fingerprint = future.result()
+                if fingerprint:
+                    fingerprints[file] = fingerprint
+    else:
+        for root, _, files in os.walk(binary):
+            for file in files:
+                sample = os.path.join(root, file)
+                fingerprint = process_executable(sample, shred_size, window_size, fp_size, data_sec)
+                if fingerprint:
+                    fingerprints[file] = fingerprint
+
+    return fingerprints
+
+
+def _update_with_raw_files(
+    raw: str, shred_size: int, window_size: int, fp_size: int, db: str
+) -> dict[str, Fingerprint]:
+    """
+    Compute the fingerprints of all the samples in `raw` directory and store them in `fingerprints.pkl`
+    """
+    fingerprints: dict[str, Fingerprint] = {}
+    if MULTIPROCESSING:
+        with ProcessPoolExecutor() as executor:
+            to_do_map = {}
+            for root, _, files in os.walk(raw):
+                for file in files:
+                    sample = os.path.join(root, file)
+                    future = executor.submit(
+                        process_raw_file, sample, shred_size, window_size, fp_size
+                    )
+                    to_do_map[future] = file
+
+            for future in as_completed(to_do_map):
+                file = to_do_map[future]
+                fingerprint = future.result()
+                if fingerprint:
+                    fingerprints[file] = fingerprint
+    else:
+        for root, _, files in os.walk(raw):
+            for file in files:
+                sample = os.path.join(root, file)
+                fingerprint = process_raw_file(sample, shred_size, window_size, fp_size)
+                if fingerprint:
+                    fingerprints[file] = fingerprint
+
+    return fingerprints
 
 
 def compare_fingerprint_db(db: str) -> None:
@@ -204,7 +240,7 @@ def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
     logging.info(f'Time             : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
 
 
-def process_sample(
+def process_executable(
     sample: str, shred_size: int, window_size: int, fp_size: int, data_sec: bool
 ) -> Fingerprint | None:
     binary_file = initailaize_binary_file(sample)
@@ -221,41 +257,41 @@ def process_sample(
         return None
 
     fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
-    logging.debug(f'{bit_count(fingerprint)} bits set in fingerprint')
+    logging.debug(f'{fingerprint.bit_count} bits set in fingerprint')
 
-    if (fp_set_bits := bit_count(fingerprint)) > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
+    if fingerprint.bit_count > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
         logging.warning(
-            f'{sample} skipped (too big to fit into the current fingerprint): {fp_set_bits=}, {fp_size=}'
+            f'{sample} skipped (too big to fit into the current fingerprint): {fingerprint.bit_count=}, {fp_size=}'
         )
         return None
 
-    return Fingerprint(fingerprint, fp_set_bits)
+    return fingerprint
 
 
-def create_fingerprint(shred_hashes: list[int], fp_size: int, window_size: int) -> bytearray:
-    fp_size_bytes = fp_size * 1024  # fp_size is in KB
-    fp_size_bits = fp_size_bytes * 8
+def process_raw_file(
+    sample: str, shred_size: int, window_size: int, fp_size: int
+) -> Fingerprint | None:
+    with open(sample, 'rb') as f:
+        data = f.read()
 
-    bit_vector = bytearray(fp_size_bytes)
-    min_hash_idx = -1
-    for i in range(len(shred_hashes) - window_size + 1):
-        # current window is shred_hashes[i:i+window_size]
+    logging.debug(f'{sample=}, {len(data)=}')
 
-        if min_hash_idx < i:  # min_hash_idx is not in current window
-            min_hash = shred_hashes[i]
-            min_hash_idx = i
-            for j in range(1, window_size):
-                if shred_hashes[i + j] <= min_hash:
-                    min_hash = shred_hashes[i + j]
-                    min_hash_idx = i + j
-            bit_vector_set(bit_vector, min_hash & (fp_size_bits - 1))
-        else:  # min_hash_idx is in current window
-            if shred_hashes[i + window_size - 1] <= min_hash:
-                min_hash = shred_hashes[i + window_size - 1]
-                min_hash_idx = i + window_size - 1
-                bit_vector_set(bit_vector, min_hash & (fp_size_bits - 1))
+    shred_hashes = []
+    for i in range(len(data) - shred_size + 1):
+        shred = data[i : i + shred_size]
+        shred_hash = djb2_hash(shred)
+        shred_hashes.append(shred_hash)
 
-    return bit_vector
+    fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
+    logging.debug(f'{fingerprint.bit_count} bits set in fingerprint')
+
+    if fingerprint.bit_count > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
+        logging.warning(
+            f'{sample} skipped (too big to fit into the current fingerprint): {fingerprint.bit_count=}, {fp_size=}'
+        )
+        return None
+
+    return fingerprint
 
 
 def shred_section(binary_file: BinaryFile, shred_size: int, data_sec: bool) -> list[int]:
@@ -294,32 +330,3 @@ def shred_section(binary_file: BinaryFile, shred_size: int, data_sec: bool) -> l
 
     logging.debug(f'{len(shred_hashes)=}')
     return shred_hashes
-
-
-def bit_vector_set(vector: bytearray, offset: int) -> None:
-    byte_index = offset >> 3
-    bit_mask = 1 << (offset & 0x7)
-    vector[byte_index] |= bit_mask
-
-
-def djb2_hash(data: bytes) -> int:
-    hash = 5381
-    for byte in data:
-        hash = hash * 33 + byte
-    # limits the hash to 32 bits (unsigned int)
-    return hash & 0xFFFFFFFF
-
-
-def jaccard_distance(fp_a: Fingerprint, fp_b: Fingerprint) -> float:
-    byteorder: Literal['little', 'big'] = 'little'
-    fp_a_bit_vector = int.from_bytes(fp_a.bit_vector, byteorder=byteorder)
-    fp_b_bit_vector = int.from_bytes(fp_b.bit_vector, byteorder=byteorder)
-    bit_vector_intersection = (fp_a_bit_vector & fp_b_bit_vector).bit_count()
-
-    bit_vector_union = fp_a.bit_count + fp_b.bit_count - bit_vector_intersection
-
-    return bit_vector_intersection / bit_vector_union
-
-
-def bit_count(fingerprint: bytearray) -> int:
-    return sum(byte.bit_count() for byte in fingerprint)
