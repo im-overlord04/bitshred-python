@@ -68,32 +68,25 @@ def _update_with_executables(
     binary: str, shred_size: int, window_size: int, fp_size: int, db: str, data_sec: bool
 ) -> dict[str, Fingerprint]:
     """
-    Compute the fingerprints of all the samples in `binary` directory and store them in `fingerprints.pkl`
+    Compute the fingerprints of all the samples in `binary` directory
     """
     fingerprints: dict[str, Fingerprint] = {}
-    if MULTIPROCESSING:
-        with ProcessPoolExecutor() as executor:
-            to_do_map = {}
-            for root, _, files in os.walk(binary):
-                for file in files:
-                    sample = os.path.join(root, file)
-                    future = executor.submit(
-                        process_executable, sample, shred_size, window_size, fp_size, data_sec
-                    )
-                    to_do_map[future] = file
-
-            for future in as_completed(to_do_map):
-                file = to_do_map[future]
-                fingerprint = future.result()
-                if fingerprint:
-                    fingerprints[file] = fingerprint
-    else:
+    max_workers = None if MULTIPROCESSING else 1
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        to_do_map = {}
         for root, _, files in os.walk(binary):
             for file in files:
                 sample = os.path.join(root, file)
-                fingerprint = process_executable(sample, shred_size, window_size, fp_size, data_sec)
-                if fingerprint:
-                    fingerprints[file] = fingerprint
+                future = executor.submit(
+                    process_executable, sample, shred_size, window_size, fp_size, data_sec
+                )
+                to_do_map[future] = file
+
+        for future in as_completed(to_do_map):
+            file = to_do_map[future]
+            fingerprint = future.result()
+            if fingerprint:
+                fingerprints[file] = fingerprint
 
     return fingerprints
 
@@ -102,32 +95,25 @@ def _update_with_raw_files(
     raw: str, shred_size: int, window_size: int, fp_size: int, db: str
 ) -> dict[str, Fingerprint]:
     """
-    Compute the fingerprints of all the samples in `raw` directory and store them in `fingerprints.pkl`
+    Compute the fingerprints of all the samples in `raw` directory
     """
     fingerprints: dict[str, Fingerprint] = {}
-    if MULTIPROCESSING:
-        with ProcessPoolExecutor() as executor:
-            to_do_map = {}
-            for root, _, files in os.walk(raw):
-                for file in files:
-                    sample = os.path.join(root, file)
-                    future = executor.submit(
-                        process_raw_file, sample, shred_size, window_size, fp_size
-                    )
-                    to_do_map[future] = file
-
-            for future in as_completed(to_do_map):
-                file = to_do_map[future]
-                fingerprint = future.result()
-                if fingerprint:
-                    fingerprints[file] = fingerprint
-    else:
+    max_workers = None if MULTIPROCESSING else 1
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        to_do_map = {}
         for root, _, files in os.walk(raw):
             for file in files:
                 sample = os.path.join(root, file)
-                fingerprint = process_raw_file(sample, shred_size, window_size, fp_size)
-                if fingerprint:
-                    fingerprints[file] = fingerprint
+                future = executor.submit(
+                    process_raw_file, sample, shred_size, window_size, fp_size
+                )
+                to_do_map[future] = file
+
+        for future in as_completed(to_do_map):
+            file = to_do_map[future]
+            fingerprint = future.result()
+            if fingerprint:
+                fingerprints[file] = fingerprint
 
     return fingerprints
 
@@ -142,23 +128,18 @@ def compare_fingerprint_db(db: str) -> None:
 
     fingerprints = pickle.load(open(os.path.join(db, FINGERPRINT_DB), 'rb'))
     jaccard_distances: dict[frozenset[str], float] = {}
-    if MULTIPROCESSING:
-        with ProcessPoolExecutor() as executor:
-            to_do_map = {}
-            for file_a, file_b in combinations(fingerprints.keys(), 2):
-                future = executor.submit(
-                    jaccard_distance, fingerprints[file_a], fingerprints[file_b]
-                )
-                to_do_map[future] = (file_a, file_b)
-
-            for future in as_completed(to_do_map):
-                file_a, file_b = to_do_map[future]
-                similarity = future.result()
-                jaccard_distances[frozenset({file_a, file_b})] = similarity
-                logging.debug(f'{file_a} vs {file_b}: {similarity=}')
-    else:
+    max_workers = None if MULTIPROCESSING else 1
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        to_do_map = {}
         for file_a, file_b in combinations(fingerprints.keys(), 2):
-            similarity = jaccard_distance(fingerprints[file_a], fingerprints[file_b])
+            future = executor.submit(
+                jaccard_distance, fingerprints[file_a], fingerprints[file_b]
+            )
+            to_do_map[future] = (file_a, file_b)
+
+        for future in as_completed(to_do_map):
+            file_a, file_b = to_do_map[future]
+            similarity = future.result()
             jaccard_distances[frozenset({file_a, file_b})] = similarity
             logging.debug(f'{file_a} vs {file_b}: {similarity=}')
 
