@@ -7,6 +7,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import combinations
 from time import perf_counter
+from typing import Callable
 
 from binary_file import BinaryFile, initailaize_binary_file
 from fingerprint import Fingerprint, create_fingerprint, fingerprint_encoder, jaccard_distance
@@ -40,11 +41,9 @@ def update_fingerprint_db(
     start_time: float = perf_counter()
 
     if binary:
-        fingerprints = _update_with_executables(
-            binary, shred_size, window_size, fp_size, all_sec
-        )
+        fingerprints = _update_with_executables(binary, shred_size, window_size, fp_size, all_sec)
     elif raw:
-        fingerprints = _update_with_raw_files(raw, shred_size, window_size, fp_size, db)
+        fingerprints = _update_with_raw_files(raw, shred_size, window_size, fp_size)
     else:
         error_message = 'Either binary or raw directory must be specified'
         logging.error(error_message)
@@ -70,43 +69,43 @@ def _update_with_executables(
     """
     Compute the fingerprints of all the samples in `binary` directory
     """
-    fingerprints: dict[str, Fingerprint] = {}
-    max_workers = None if MULTIPROCESSING else 1
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        to_do_map = {}
-        for root, _, files in os.walk(binary):
-            for file in files:
-                sample = os.path.join(root, file)
-                future = executor.submit(
-                    process_executable, sample, shred_size, window_size, fp_size, data_sec
-                )
-                to_do_map[future] = file
-
-        for future in as_completed(to_do_map):
-            file = to_do_map[future]
-            fingerprint = future.result()
-            if fingerprint:
-                fingerprints[file] = fingerprint
-
-    return fingerprints
+    return _update_runner(
+        processor=process_executable,
+        sample_dir=binary,
+        shred_size=shred_size,
+        window_size=window_size,
+        fp_size=fp_size,
+        all_sec=all_sec,
+    )
 
 
 def _update_with_raw_files(
-    raw: str, shred_size: int, window_size: int, fp_size: int, db: str
+    raw: str, shred_size: int, window_size: int, fp_size: int
 ) -> dict[str, Fingerprint]:
     """
     Compute the fingerprints of all the samples in `raw` directory
     """
+    return _update_runner(
+        processor=process_raw_file,
+        sample_dir=raw,
+        shred_size=shred_size,
+        window_size=window_size,
+        fp_size=fp_size,
+    )
+
+
+def _update_runner(processor: Callable, sample_dir: str, **kwargs) -> dict[str, Fingerprint]:
+    """
+    Compute the fingerprints of all the samples in `sample_dir`
+    """
     fingerprints: dict[str, Fingerprint] = {}
     max_workers = None if MULTIPROCESSING else 1
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         to_do_map = {}
-        for root, _, files in os.walk(raw):
+        for root, _, files in os.walk(sample_dir):
             for file in files:
                 sample = os.path.join(root, file)
-                future = executor.submit(
-                    process_raw_file, sample, shred_size, window_size, fp_size
-                )
+                future = executor.submit(processor, sample, **kwargs)
                 to_do_map[future] = file
 
         for future in as_completed(to_do_map):
@@ -132,9 +131,7 @@ def compare_fingerprint_db(db: str) -> None:
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         to_do_map = {}
         for file_a, file_b in combinations(fingerprints.keys(), 2):
-            future = executor.submit(
-                jaccard_distance, fingerprints[file_a], fingerprints[file_b]
-            )
+            future = executor.submit(jaccard_distance, fingerprints[file_a], fingerprints[file_b])
             to_do_map[future] = (file_a, file_b)
 
         for future in as_completed(to_do_map):
