@@ -15,7 +15,7 @@ def main(args: argparse.Namespace) -> None:
             window_size=args.window_size,
             fp_size=args.fp_size,
             db=args.db,
-            data_sec=args.data_sec,
+            all_sec=args.all_sec,
         )
     elif args.compare:
         compare_fingerprint_db(args.db)
@@ -51,7 +51,7 @@ if __name__ == '__main__':
     parser.add_argument('--fp-size', help='Fingerprint size (in KB)', default=32, type=int)
     parser.add_argument('-d', '--db', help='Set database path', default='.', type=str)
     parser.add_argument(
-        '--data-sec', help='Include .data section in the shreding process', action='store_true'
+        '--all-sec', help='Include all sections in the shreding process', action='store_true'
     )
     parser.add_argument('-j', '--jacard', help='Set Jaccard threshold', default=0.6, type=float)
 

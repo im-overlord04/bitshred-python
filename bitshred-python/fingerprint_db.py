@@ -30,7 +30,7 @@ MULTIPROCESSING = True
 
 
 def update_fingerprint_db(
-    binary: str, raw: str, shred_size: int, window_size: int, fp_size: int, db: str, data_sec: bool
+    binary: str, raw: str, shred_size: int, window_size: int, fp_size: int, db: str, all_sec: bool
 ) -> None:
     """
     Compute the fingerprints of all the samples in either `binary` or `raw` directory depending on the settings
@@ -41,7 +41,7 @@ def update_fingerprint_db(
 
     if binary:
         fingerprints = _update_with_executables(
-            binary, shred_size, window_size, fp_size, db, data_sec
+            binary, shred_size, window_size, fp_size, all_sec
         )
     elif raw:
         fingerprints = _update_with_raw_files(raw, shred_size, window_size, fp_size, db)
@@ -65,7 +65,7 @@ def update_fingerprint_db(
 
 
 def _update_with_executables(
-    binary: str, shred_size: int, window_size: int, fp_size: int, db: str, data_sec: bool
+    binary: str, shred_size: int, window_size: int, fp_size: int, all_sec: bool
 ) -> dict[str, Fingerprint]:
     """
     Compute the fingerprints of all the samples in `binary` directory
@@ -222,14 +222,14 @@ def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
 
 
 def process_executable(
-    sample: str, shred_size: int, window_size: int, fp_size: int, data_sec: bool
+    sample: str, shred_size: int, window_size: int, fp_size: int, all_sec: bool
 ) -> Fingerprint | None:
     binary_file = initailaize_binary_file(sample)
     if not binary_file:
         return None
 
     logging.debug(binary_file)
-    shred_hashes = shred_section(binary_file, shred_size, data_sec)
+    shred_hashes = shred_section(binary_file, shred_size, all_sec)
 
     if len(shred_hashes) < window_size:
         logging.warning(
@@ -275,20 +275,20 @@ def process_raw_file(
     return fingerprint
 
 
-def shred_section(binary_file: BinaryFile, shred_size: int, data_sec: bool) -> list[int]:
+def shred_section(binary_file: BinaryFile, shred_size: int, all_sec: bool) -> list[int]:
     logging.debug(f'Shredding {binary_file.filename}')
 
     shred_hashes = []
     for section in binary_file.sections:
-        # only process the executable section located at entry point whose name is .text or CODE
-        # and the .data section if the data_sec flag is set
+        # only process the executable sections located at entry point whose name is .text or CODE
+        # or all sections if the all_sec flag is set
         if (
             (
                 not section.is_code
                 or not (section.vma <= binary_file.start_addr <= section.vma + section.data_size)
             )
             and section.name not in ('.text', 'CODE')
-            and not (data_sec and section.name == '.data')
+            and not all_sec
         ):
             logging.debug(f'Skipping section {section.name}: {section}')
             continue
