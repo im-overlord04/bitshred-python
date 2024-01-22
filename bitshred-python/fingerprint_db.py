@@ -27,7 +27,8 @@ JACCARD_JSON = f'{JACCARD_BASE}.json'
 CLUSTER_JSON = f'{CLUSTER_BASE}.json'
 
 MAX_SET_BITS_RATIO = 0.7
-MULTIPROCESSING = True
+DEBUG = os.getenv('DEBUG', '').lower() in ('true', '1')
+MULTIPROCESSING = not DEBUG
 
 
 def update_fingerprint_db(
@@ -99,7 +100,7 @@ def _update_runner(processor: Callable, sample_dir: str, **kwargs) -> dict[str, 
     Compute the fingerprints of all the samples in `sample_dir`
     """
     fingerprints: dict[str, Fingerprint] = {}
-    max_workers = None if MULTIPROCESSING else 1
+    max_workers = os.cpu_count() if MULTIPROCESSING else 1
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         to_do_map = {}
         for root, _, files in os.walk(sample_dir):
@@ -127,30 +128,71 @@ def compare_fingerprint_db(db: str) -> None:
 
     fingerprints = pickle.load(open(os.path.join(db, FINGERPRINT_DB), 'rb'))
     jaccard_distances: dict[frozenset[str], float] = {}
-    max_workers = None if MULTIPROCESSING else 1
+    max_workers = os.cpu_count() if MULTIPROCESSING else 1
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         to_do_map = {}
-        for file_a, file_b in combinations(fingerprints.keys(), 2):
-            future = executor.submit(jaccard_distance, fingerprints[file_a], fingerprints[file_b])
-            to_do_map[future] = (file_a, file_b)
+
+        n_fingerprints = len(fingerprints)
+        n_comparisons = n_fingerprints * (n_fingerprints - 1) // 2
+        batch_size = max(100, n_comparisons // (max_workers * 10))
+        # cannot materialize all the pairs since it will take too much memory
+        all_pairs = combinations(fingerprints.keys(), 2)
+
+        logging.debug(
+            f'{n_comparisons} comparisons to be done, {batch_size} per batch, {max_workers} workers'
+        )
+
+        # submit every comparision to the executor would create too many tasks
+        # so we submit them in batches
+        while True:
+            # return None if there is no more pair
+            batch = list(next(all_pairs, None) for _ in range(batch_size))
+
+            # break if no more pairs
+            if not any(batch):
+                break
+
+            future = executor.submit(_compare_batch_runner, batch, fingerprints)
+            to_do_map[future] = batch
 
         for future in as_completed(to_do_map):
-            file_a, file_b = to_do_map[future]
-            similarity = future.result()
-            jaccard_distances[frozenset({file_a, file_b})] = similarity
-            logging.debug(f'{file_a} vs {file_b}: {similarity=}')
+            batch_results = future.result()
+            for file_a, file_b, similarity in batch_results:
+                jaccard_distances[frozenset({file_a, file_b})] = similarity
 
     pickle.dump(jaccard_distances, open(os.path.join(db, JACCARD_DB), 'wb'))
-    json.dump(
-        {reprlib.repr(k): v for k, v in jaccard_distances.items()},
-        open(os.path.join(db, JACCARD_JSON), 'w'),
-        indent=4,
-    )
+
+    # more than 2GB+ of data will be produced if we have 6000+ samples
+    # so we only dump the json file if we are in debug mode
+    if DEBUG:
+        json.dump(
+            {reprlib.repr(k): v for k, v in jaccard_distances.items()},
+            open(os.path.join(db, JACCARD_JSON), 'w'),
+            indent=4,
+        )
 
     elapsed_time = perf_counter() - start_time
     logging.info('--------------- Comparing Database ---------------')
     logging.info(f'# of viruses : {len(fingerprints)}')
     logging.info(f'Time         : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
+
+
+def _compare_batch_runner(
+    batch: list[tuple[str, str]], fingerprints: dict[str, Fingerprint]
+) -> list[tuple[str, str, float]]:
+    results = []
+    for pair in batch:
+        if pair is None:
+            break
+
+        file_a, file_b = pair
+        similarity = jaccard_distance(fingerprints[file_a], fingerprints[file_b])
+        results.append((file_a, file_b, similarity))
+
+        if DEBUG:
+            logging.debug(f'{file_a} vs {file_b}: {similarity=}')
+
+    return results
 
 
 def cluster_fingerprint_db(db: str, jacard_threshold: float) -> None:
@@ -235,13 +277,15 @@ def process_executable(
         return None
 
     fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
-    logging.debug(f'{fingerprint.bit_count} bits set in fingerprint')
-
     if fingerprint.bit_count > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
         logging.warning(
             f'{sample} skipped (too big to fit into the current fingerprint): {fingerprint.bit_count=}, {fp_size=}'
         )
         return None
+
+    logging.debug(
+        f'{sample} fingerprint created sucessfully: {fingerprint.bit_count} bits set in fingerprint'
+    )
 
     return fingerprint
 
@@ -261,13 +305,15 @@ def process_raw_file(
         shred_hashes.append(shred_hash)
 
     fingerprint = create_fingerprint(shred_hashes, fp_size, window_size)
-    logging.debug(f'{fingerprint.bit_count} bits set in fingerprint')
-
     if fingerprint.bit_count > fp_size * 1024 * 8 * MAX_SET_BITS_RATIO:
         logging.warning(
             f'{sample} skipped (too big to fit into the current fingerprint): {fingerprint.bit_count=}, {fp_size=}'
         )
         return None
+
+    logging.debug(
+        f'{sample} fingerprint created sucessfully: {fingerprint.bit_count} bits set in fingerprint'
+    )
 
     return fingerprint
 
@@ -277,26 +323,29 @@ def shred_section(binary_file: BinaryFile, shred_size: int, all_sec: bool) -> li
 
     shred_hashes = []
     for section in binary_file.sections:
-        # only process the executable sections located at entry point whose name is .text or CODE
-        # or all sections if the all_sec flag is set
         if (
+            # process the executable section located at entry point
             (
                 not section.is_code
                 or not (section.vma <= binary_file.start_addr <= section.vma + section.data_size)
             )
+            # process the section whose name is .text or CODE
             and section.name not in ('.text', 'CODE')
+            # process all sections if the all_sec flag is set
             and not all_sec
         ):
-            logging.debug(f'Skipping section {section.name}: {section}')
+            logging.debug(f'({binary_file.filename}) Skipping section {section.name}: {section}')
             continue
 
         if section.data_size < shred_size:
             logging.warning(
-                f'Invalid size for section {section.name}: {section.data_size=}, {shred_size=}'
+                f'({binary_file.filename}) Invalid size for section {section.name}: {section.data_size=}, {shred_size=}'
             )
             continue
 
-        logging.debug(f'Processing section {section.name}: {section.data_size=}, {shred_size=}')
+        logging.debug(
+            f'({binary_file.filename}) Processing section {section.name}: {section.data_size=}, {shred_size=}'
+        )
 
         section_shred_num = section.data_size - shred_size + 1
         for i in range(section_shred_num):
@@ -304,7 +353,7 @@ def shred_section(binary_file: BinaryFile, shred_size: int, all_sec: bool) -> li
             shred_hash = djb2_hash(shred)
             shred_hashes.append(shred_hash)
 
-        logging.debug(f'Finished processing section {section.name}')
+        logging.debug(f'({binary_file.filename}) Finished processing section {section.name}')
 
     logging.debug(f'{len(shred_hashes)=}')
     return shred_hashes
