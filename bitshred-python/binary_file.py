@@ -58,7 +58,11 @@ def initailaize_binary_file(file_path: str) -> BinaryFile | None:
     except pefile.PEFormatError:
         logging.warning(f'{file_path} is not a PE file')
         return None
-    
+    except Exception:
+        # Log an ERROR message along with the exception information
+        logging.exception(f'Error while processing {file_path}')
+        return None
+
     def _section_size(raw_size: int, virtual_size: int) -> int:
         min_size = min(raw_size, virtual_size)
         if min_size == 0:
@@ -68,7 +72,8 @@ def initailaize_binary_file(file_path: str) -> BinaryFile | None:
 
     sections_data = [
         Section(
-            name=section.Name.decode().rstrip('\x00'),
+            # some section names are not utf-8 decodable, ignore the errors
+            name=section.Name.decode('utf-8', errors='ignore').rstrip('\x00'),
             data=section.get_data(),
             data_size=_section_size(section.SizeOfRawData, section.Misc_VirtualSize),
             vma=Address(pe.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),

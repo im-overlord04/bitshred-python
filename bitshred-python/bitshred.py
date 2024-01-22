@@ -7,8 +7,16 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 
 def main(args: argparse.Namespace) -> None:
-    if args.binary:
-        update_fingerprint_db(args.binary, args.shred_size, args.window_size, args.fp_size, args.db)
+    if args.binary or args.raw:
+        update_fingerprint_db(
+            binary=args.binary,
+            raw=args.raw,
+            shred_size=args.shred_size,
+            window_size=args.window_size,
+            fp_size=args.fp_size,
+            db=args.db,
+            all_sec=args.all_sec,
+        )
     elif args.compare:
         compare_fingerprint_db(args.db)
     elif args.cluster:
@@ -22,7 +30,13 @@ if __name__ == '__main__':
     execution_mode.add_argument(
         '-b',
         '--binary',
-        help='Update database by processing binary files, add path to directory containing binary files after this option',
+        help='Update database by processing binary files (PE files), add path to directory containing binary files after this option',
+        default=None,
+    )
+    execution_mode.add_argument(
+        '-a',
+        '--raw',
+        help='Update database by processing raw binary files, add path to directory containing raw binary files after this option',
         default=None,
     )
     execution_mode.add_argument(
@@ -36,6 +50,9 @@ if __name__ == '__main__':
     parser.add_argument('-w', '--window-size', help='Window size', default=16, type=int)
     parser.add_argument('--fp-size', help='Fingerprint size (in KB)', default=32, type=int)
     parser.add_argument('-d', '--db', help='Set database path', default='.', type=str)
+    parser.add_argument(
+        '--all-sec', help='Include all sections in the shreding process', action='store_true'
+    )
     parser.add_argument('-j', '--jacard', help='Set Jaccard threshold', default=0.6, type=float)
 
     args = parser.parse_args()
