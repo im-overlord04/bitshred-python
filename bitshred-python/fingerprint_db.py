@@ -128,13 +128,13 @@ def compare_fingerprint_db(db: str) -> None:
 
     fingerprints = pickle.load(open(os.path.join(db, FINGERPRINT_DB), 'rb'))
     jaccard_distances: dict[frozenset[str], float] = {}
-    max_workers = os.cpu_count() if MULTIPROCESSING else 1
+    max_workers = os.cpu_count()//2 if MULTIPROCESSING else 1
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         to_do_map = {}
 
         n_fingerprints = len(fingerprints)
         n_comparisons = n_fingerprints * (n_fingerprints - 1) // 2
-        batch_size = max(100, n_comparisons // (max_workers * 10))
+        batch_size = max(100, n_comparisons // (max_workers * 10 * 1000))
         # cannot materialize all the pairs since it will take too much memory
         all_pairs = combinations(fingerprints.keys(), 2)
 
@@ -155,21 +155,81 @@ def compare_fingerprint_db(db: str) -> None:
             future = executor.submit(_compare_batch_runner, batch, fingerprints)
             to_do_map[future] = batch
 
-        for future in as_completed(to_do_map):
+        for i, future in enumerate(as_completed(to_do_map)):
+            jaccard_distances: dict[frozenset[str], float] = {}
             batch_results = future.result()
             for file_a, file_b, similarity in batch_results:
                 jaccard_distances[frozenset({file_a, file_b})] = similarity
+            pickle.dump(jaccard_distances, open(os.path.join(db, f'{JACCARD_BASE}_{i+1}.pkl'), 'wb'))
+            # more than 2GB+ of data will be produced if we have 6000+ samples
+            # so we only dump the json file if we are in debug mode
+            if DEBUG:
+                json.dump(
+                    {reprlib.repr(k): v for k, v in jaccard_distances.items()},
+                    open(os.path.join(db, f'{JACCARD_BASE}_{i+1}.pkl'), 'w'),
+                    indent=4,
+                )
 
-    pickle.dump(jaccard_distances, open(os.path.join(db, JACCARD_DB), 'wb'))
+    elapsed_time = perf_counter() - start_time
+    logging.info('--------------- Comparing Database ---------------')
+    logging.info(f'# of viruses : {len(fingerprints)}')
+    logging.info(f'Time         : {elapsed_time // 60:.0f}min{elapsed_time % 60:.3f}sec')
 
-    # more than 2GB+ of data will be produced if we have 6000+ samples
-    # so we only dump the json file if we are in debug mode
-    if DEBUG:
-        json.dump(
-            {reprlib.repr(k): v for k, v in jaccard_distances.items()},
-            open(os.path.join(db, JACCARD_JSON), 'w'),
-            indent=4,
+def efficient_compare_fingerprint_db(db: str) -> None:
+    """
+    Compare the fingerprints of all the samples in `fingerprints.pkl` pairwise using Jaccard distance
+    and store the results in `jaccard.pkl`
+    """
+    # for performance measurement
+    start_time: float = perf_counter()
+
+    fingerprints = pickle.load(open(os.path.join(db, FINGERPRINT_DB), 'rb'))
+    jaccard_distances: dict[frozenset[str], float] = {}
+    max_workers = os.cpu_count()//2 if MULTIPROCESSING else 1
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        to_do_map = []
+
+        n_fingerprints = len(fingerprints)
+        n_comparisons = n_fingerprints * (n_fingerprints - 1) // 2
+        batch_size = max(100, n_comparisons // (max_workers * 10 * 1000))
+        # cannot materialize all the pairs since it will take too much memory
+        all_pairs = combinations(fingerprints.keys(), 2)
+
+        logging.debug(
+            f'{n_comparisons} comparisons to be done, {batch_size} per batch, {max_workers} workers'
         )
+
+        # submit every comparision to the executor would create too many tasks
+        # so we submit them in batches
+        while True:
+            # return None if there is no more pair
+            batch = list(next(all_pairs, None) for _ in range(batch_size))
+
+            # break if no more pairs
+            if not any(batch):
+                break
+            
+            batch_pairs=[]
+            for a, b in batch:
+                batch_pairs.append((a,b,fingerprints[a], fingerprints[b]))
+
+            future = executor.submit(_efficient_compare_batch_runner, batch_pairs)
+            to_do_map.append(future)
+
+        for i, future in enumerate(as_completed(to_do_map)):
+            jaccard_distances: dict[frozenset[str], float] = {}
+            batch_results = future.result()
+            for file_a, file_b, similarity in batch_results:
+                jaccard_distances[frozenset({file_a, file_b})] = similarity
+            pickle.dump(jaccard_distances, open(os.path.join(db, f'{JACCARD_BASE}_{i+1}.pkl'), 'wb'))
+            # more than 2GB+ of data will be produced if we have 6000+ samples
+            # so we only dump the json file if we are in debug mode
+            if DEBUG:
+                json.dump(
+                    {reprlib.repr(k): v for k, v in jaccard_distances.items()},
+                    open(os.path.join(db, f'{JACCARD_BASE}_{i+1}.pkl'), 'w'),
+                    indent=4,
+                )
 
     elapsed_time = perf_counter() - start_time
     logging.info('--------------- Comparing Database ---------------')
@@ -187,6 +247,20 @@ def _compare_batch_runner(
 
         file_a, file_b = pair
         similarity = jaccard_distance(fingerprints[file_a], fingerprints[file_b])
+        results.append((file_a, file_b, similarity))
+
+        if DEBUG:
+            logging.debug(f'{file_a} vs {file_b}: {similarity=}')
+
+    return results
+
+def _efficient_compare_batch_runner(batch: list[tuple[str, str, Fingerprint, Fingerprint]]) -> list[tuple[str, str, float]]:
+    results = []
+    for pair in batch:
+        if pair is None:
+            break
+        file_a, file_b, f_a, f_b=pair
+        similarity = jaccard_distance(f_a, f_b)
         results.append((file_a, file_b, similarity))
 
         if DEBUG:

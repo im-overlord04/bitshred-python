@@ -1,7 +1,7 @@
 import argparse
 import logging
 
-from fingerprint_db import cluster_fingerprint_db, compare_fingerprint_db, update_fingerprint_db
+from fingerprint_db import cluster_fingerprint_db, compare_fingerprint_db, update_fingerprint_db, efficient_compare_fingerprint_db
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.DEBUG)
 
